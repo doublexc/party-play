@@ -1,0 +1,6 @@
+.topbar { background: #fff; border-bottom: 3px solid var(--pop); position: sticky; top: 0; z-index: 5; }
+.topbar__in { max-width: 720px; margin: 0 auto; padding: .6rem 1rem; display: flex; justify-content: space-between; align-items: center; gap: .5rem 1rem; flex-wrap: wrap; }
+.brand { font-weight: 700; font-size: 1.15rem; color: var(--ink); }
+.topbar nav { display: flex; gap: 1rem; }
+.topbar nav a { color: var(--muted); font-weight: 600; font-size: .9rem; }
+.topbar nav a.active { color: var(--accent); }

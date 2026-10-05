@@ -1,0 +1,7 @@
+.btn { display: inline-block; padding: .5rem 1rem; border-radius: 6px; border: 1px solid transparent; font: inherit; font-weight: 600; cursor: pointer; text-align: center; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: var(--accent-d); }
+.btn-ghost { background: #fff; border-color: var(--line); color: var(--ink); }
+.btn-ghost:hover:not(:disabled) { border-color: var(--accent); }
+.btn-danger { background: var(--bad); color: #fff; }

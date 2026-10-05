@@ -1,0 +1,4 @@
+.badge { display: inline-block; padding: .05rem .6rem; border-radius: 999px; font-size: .8rem; font-weight: 600; white-space: nowrap; }
+.badge-planning { background: #d9f0e7; color: #0b5c56; }
+.badge-playing { background: #dfe7f7; color: #1e3a8a; }
+.badge-cancelled { background: #f8dcd8; color: #8e2a20; }

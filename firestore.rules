@@ -1,0 +1,229 @@
+rules_version = '2';
+
+// Party Play — Firestore rules (draft v1)
+// Data model:
+//   users/{uid}                        displayName, createdAt, lastCreatedAt?
+//   users/{uid}/private/contact        email (required), phone?, social1-3?   (owner only)
+//   parties/{partyId}                  creatorId, creatorName, title, datetime, description,
+//                                      maxPlayers, status, memberCount, createdAt
+//   parties/{partyId}/members/{uid}    displayName, joinedAt                   (public list)
+//   parties/{partyId}/contacts/{uid}   only the fields the member chose to show (any signed-in user)
+//
+// NOTE: if other apps in this Firebase project use Firestore (default) database,
+// add their own `match` blocks below BEFORE deploying, or they will be denied.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function isStr(v, minLen, maxLen) {
+      return v is string && v.size() >= minLen && v.size() <= maxLen;
+    }
+
+    function optStr(d, k, maxLen) {
+      return !(k in d) || (d[k] is string && d[k].size() <= maxLen);
+    }
+
+    function validName(v) {
+      return isStr(v, 1, 30);
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function partyPath(pid) {
+      return /databases/$(database)/documents/parties/$(pid);
+    }
+
+    function memberPath(pid, uid) {
+      return /databases/$(database)/documents/parties/$(pid)/members/$(uid);
+    }
+
+    function contactPath(pid, uid) {
+      return /databases/$(database)/documents/parties/$(pid)/contacts/$(uid);
+    }
+
+    function contactFieldsOk(d) {
+      return d.keys().hasOnly(['email', 'phone', 'social1', 'social2', 'social3'])
+        && optStr(d, 'email', 254)
+        && optStr(d, 'phone', 20)
+        && optStr(d, 'social1', 100)
+        && optStr(d, 'social2', 100)
+        && optStr(d, 'social3', 100);
+    }
+
+    function privateContactOk(d) {
+      return contactFieldsOk(d)
+        && 'email' in d
+        && isStr(d.email, 3, 254)
+        && d.email.matches('.+@.+');
+    }
+
+    function partyFieldsOk(d) {
+      return isStr(d.title, 1, 80)
+        && isStr(d.description, 0, 500)
+        && d.maxPlayers is int
+        && d.maxPlayers >= 2
+        && d.maxPlayers <= 100
+        && d.datetime is timestamp
+        && d.datetime < request.time + duration.value(365, 'd')
+        && d.status in ['PLANNING', 'PLAYING', 'CANCELLED'];
+    }
+
+    // Rate limit: at most one party per 60s per uid.
+    // The client must update users/{uid}.lastCreatedAt = serverTimestamp()
+    // in the same batch that creates the party.
+    function rateOk() {
+      let before = get(userPath(request.auth.uid)).data;
+      let after = getAfter(userPath(request.auth.uid)).data;
+      return after.get('lastCreatedAt', null) == request.time
+        && (!('lastCreatedAt' in before)
+            || request.time > before.lastCreatedAt + duration.value(60, 's'));
+    }
+
+    // ---------- users ----------
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['displayName', 'createdAt'])
+        && validName(request.resource.data.displayName)
+        && request.resource.data.createdAt == request.time;
+
+      allow update: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['displayName', 'createdAt', 'lastCreatedAt'])
+        && request.resource.data.createdAt == resource.data.createdAt
+        && validName(request.resource.data.displayName)
+        && (request.resource.data.get('lastCreatedAt', null) == resource.data.get('lastCreatedAt', null)
+            || request.resource.data.lastCreatedAt == request.time);
+
+      allow delete: if false;
+
+      match /private/contact {
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid) && privateContactOk(request.resource.data);
+        allow delete: if false;
+      }
+    }
+
+    // ---------- parties ----------
+    match /parties/{partyId} {
+
+      // Board is public to any signed-in (incl. anonymous) user.
+      allow read: if signedIn();
+
+      // Create: creator must also create their own member + contact docs
+      // in the same batch, and bump users/{uid}.lastCreatedAt (rate limit).
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+             'creatorId', 'creatorName', 'title', 'datetime', 'description',
+             'maxPlayers', 'status', 'memberCount', 'createdAt'])
+        && request.resource.data.creatorId == request.auth.uid
+        && validName(request.resource.data.creatorName)
+        && partyFieldsOk(request.resource.data)
+        && request.resource.data.status == 'PLANNING'
+        && request.resource.data.memberCount == 1
+        && request.resource.data.createdAt == request.time
+        && existsAfter(memberPath(partyId, request.auth.uid))
+        && existsAfter(contactPath(partyId, request.auth.uid))
+        && rateOk();
+
+      function creatorEdit() {
+        let d = request.resource.data;
+        let o = resource.data;
+        return request.auth.uid == o.creatorId
+          && d.diff(o).affectedKeys().hasOnly(
+               ['title', 'datetime', 'description', 'maxPlayers', 'status'])
+          && partyFieldsOk(d)
+          && d.maxPlayers >= o.memberCount;
+      }
+
+      function joinParty() {
+        let d = request.resource.data;
+        let o = resource.data;
+        let uid = request.auth.uid;
+        return d.diff(o).affectedKeys().hasOnly(['memberCount'])
+          && d.memberCount == o.memberCount + 1
+          && d.memberCount <= o.maxPlayers
+          && o.status in ['PLANNING', 'PLAYING']
+          && !exists(memberPath(partyId, uid))
+          && existsAfter(memberPath(partyId, uid))
+          && existsAfter(contactPath(partyId, uid));
+      }
+
+      function leaveParty() {
+        let d = request.resource.data;
+        let o = resource.data;
+        let uid = request.auth.uid;
+        return d.diff(o).affectedKeys().hasOnly(['memberCount'])
+          && d.memberCount == o.memberCount - 1
+          && uid != o.creatorId
+          && exists(memberPath(partyId, uid))
+          && !existsAfter(memberPath(partyId, uid))
+          && !existsAfter(contactPath(partyId, uid));
+      }
+
+      allow update: if signedIn() && (creatorEdit() || joinParty() || leaveParty());
+
+      // Parties are never deleted; cancel via status = CANCELLED.
+      allow delete: if false;
+
+      // ----- members (public list, display name only) -----
+      match /members/{uid} {
+        allow read: if signedIn();
+
+        // Creator bootstrap (party doesn't exist yet) OR normal join (count + 1).
+        allow create: if isOwner(uid)
+          && request.resource.data.keys().hasOnly(['displayName', 'joinedAt'])
+          && validName(request.resource.data.displayName)
+          && request.resource.data.joinedAt == request.time
+          && (
+               (!exists(partyPath(partyId))
+                 && existsAfter(partyPath(partyId))
+                 && getAfter(partyPath(partyId)).data.creatorId == uid)
+               ||
+               (exists(partyPath(partyId))
+                 && getAfter(partyPath(partyId)).data.memberCount
+                    == get(partyPath(partyId)).data.memberCount + 1)
+             );
+
+        allow update: if false;
+
+        // Leave: not the creator, and count goes down by 1 in the same batch.
+        allow delete: if isOwner(uid)
+          && uid != get(partyPath(partyId)).data.creatorId
+          && getAfter(partyPath(partyId)).data.memberCount
+             == get(partyPath(partyId)).data.memberCount - 1;
+      }
+
+      // ----- contacts (only fields the member chose to reveal; any signed-in user can read) -----
+      match /contacts/{uid} {
+        allow read: if signedIn();
+
+        // Only at join time, together with the member doc.
+        allow create: if isOwner(uid)
+          && contactFieldsOk(request.resource.data)
+          && !exists(memberPath(partyId, uid))
+          && existsAfter(memberPath(partyId, uid));
+
+        allow update: if isOwner(uid)
+          && exists(memberPath(partyId, uid))
+          && contactFieldsOk(request.resource.data);
+
+        // Must be removed together with the member doc when leaving.
+        allow delete: if isOwner(uid) && !existsAfter(memberPath(partyId, uid));
+      }
+    }
+
+    // Everything else: denied by default.
+  }
+}

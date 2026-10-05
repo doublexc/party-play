@@ -1,0 +1,3 @@
+.notice { padding: .7rem 1rem; border-radius: 6px; font-size: .9rem; margin: .75rem 0; }
+.notice-warn { background: #fff7d6; border: 1px solid var(--pop); color: #6b4e00; }
+.notice-info { background: #e3f1ee; border: 1px solid #9ccfc6; color: #0b4f49; }
