@@ -5,6 +5,7 @@ import Modal from '../components/Modal.jsx'
 import Notice from '../components/Notice.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import ContactPicker from '../components/ContactPicker.jsx'
+import ChatLog from '../components/ChatLog.jsx'
 import { useUser } from '../lib/auth.jsx'
 import { useParty, joinParty, leaveParty, setPartyStatus } from '../lib/parties.js'
 import { CONTACT_FIELDS, STATUS, UNVERIFIED, fmtDate } from '../lib/format.js'
@@ -24,6 +25,7 @@ export default function PartyDetail() {
 
   const isCreator = p.creatorId === user.userId
   const full = p.memberCount >= p.maxPlayers
+  const myName = members.find((m) => m.userId === user.userId)?.name
 
   const run = async (fn) => {
     setBusy(true); setErr('')
@@ -32,7 +34,7 @@ export default function PartyDetail() {
       setErr('ทำรายการไม่สำเร็จ (' + (e.code || e.message) + ') อาจมีคนอื่นเข้าร่วมหรือแก้ไขพร้อมกัน ลองใหม่อีกครั้ง')
     } finally { setBusy(false) }
   }
-  const setStatus = (status) => (status === 'CANCELLED' ? setModal('cancel') : run(() => setPartyStatus(id, status)))
+  const setStatus = (status) => (status === 'CANCELLED' ? setModal('cancel') : run(() => setPartyStatus(p, status)))
 
   return (
     <>
@@ -50,7 +52,7 @@ export default function PartyDetail() {
           {!isMember && p.status !== 'CANCELLED' && (
             <Button onClick={() => setModal('join')} disabled={full || busy}>{full ? 'นัดเต็มแล้ว' : 'เข้าร่วม'}</Button>
           )}
-          {isMember && !isCreator && <Button variant="ghost" disabled={busy} onClick={() => run(() => leaveParty(id, user.userId))}>ถอนตัว</Button>}
+          {isMember && !isCreator && <Button variant="ghost" disabled={busy} onClick={() => run(() => leaveParty(id, user.userId, myName))}>ถอนตัว</Button>}
         </div>
         {err && <p className="error">{err}</p>}
       </div>
@@ -86,6 +88,8 @@ export default function PartyDetail() {
         ))}
       </div>
 
+      <ChatLog partyId={id} user={user} status={p.status} isMember={isMember} myName={myName} />
+
       {modal === 'join' && (
         <Modal title="เข้าร่วมนัด" onClose={() => setModal(null)}>
           <Notice>{UNVERIFIED}</Notice>
@@ -102,7 +106,7 @@ export default function PartyDetail() {
       {modal === 'cancel' && (
         <Modal title="ต้องการยกเลิกนัดนี้หรือไม่?" onClose={() => setModal(null)}>
           <div className="row">
-            <Button variant="danger" disabled={busy} onClick={() => run(() => setPartyStatus(id, 'CANCELLED'))}>ยืนยันการยกเลิก</Button>
+            <Button variant="danger" disabled={busy} onClick={() => run(() => setPartyStatus(p, 'CANCELLED'))}>ยืนยันการยกเลิก</Button>
             <Button variant="ghost" onClick={() => setModal(null)}>กลับ</Button>
           </div>
         </Modal>

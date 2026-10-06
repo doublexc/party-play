@@ -8,6 +8,7 @@ rules_version = '2';
 //                                      maxPlayers, status, memberCount, createdAt
 //   parties/{partyId}/members/{uid}    displayName, joinedAt                   (public list)
 //   parties/{partyId}/contacts/{uid}   only the fields the member chose to show (any signed-in user)
+//   parties/{partyId}/messages/{mid}   immutable chat log: chat lines (members) + system lines (join/leave/status)
 //
 // NOTE: if other apps in this Firebase project use Firestore (default) database,
 // add their own `match` blocks below BEFORE deploying, or they will be denied.
@@ -100,11 +101,13 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time;
 
       allow update: if isOwner(uid)
-        && request.resource.data.keys().hasOnly(['displayName', 'createdAt', 'lastCreatedAt'])
+        && request.resource.data.keys().hasOnly(['displayName', 'createdAt', 'lastCreatedAt', 'lastMessageAt'])
         && request.resource.data.createdAt == resource.data.createdAt
         && validName(request.resource.data.displayName)
         && (request.resource.data.get('lastCreatedAt', null) == resource.data.get('lastCreatedAt', null)
-            || request.resource.data.lastCreatedAt == request.time);
+            || request.resource.data.lastCreatedAt == request.time)
+        && (request.resource.data.get('lastMessageAt', null) == resource.data.get('lastMessageAt', null)
+            || request.resource.data.lastMessageAt == request.time);
 
       allow delete: if false;
 
@@ -221,6 +224,65 @@ service cloud.firestore {
 
         // Must be removed together with the member doc when leaving.
         allow delete: if isOwner(uid) && !existsAfter(memberPath(partyId, uid));
+      }
+
+      // ----- messages: immutable log. Anyone signed in reads; only members chat (1 per 5 min per user);
+      // system lines must accompany the real change (join/leave/status) in the same batch -----
+      match /messages/{mid} {
+        function chatMsg() {
+          let d = request.resource.data;
+          let uid = request.auth.uid;
+          return d.type == 'chat'
+            && d.keys().hasOnly(['type', 'uid', 'name', 'text', 'createdAt'])
+            && d.uid == uid
+            && isStr(d.text, 1, 500)
+            && d.name == get(memberPath(partyId, uid)).data.displayName
+            && get(partyPath(partyId)).data.status != 'CANCELLED'
+            && getAfter(userPath(uid)).data.get('lastMessageAt', null) == request.time
+            && (!('lastMessageAt' in get(userPath(uid)).data)
+                || request.time > get(userPath(uid)).data.lastMessageAt + duration.value(5, 'm'));
+        }
+
+        function joinMsg() {
+          let d = request.resource.data;
+          let uid = request.auth.uid;
+          return d.type == 'join'
+            && d.keys().hasOnly(['type', 'uid', 'name', 'createdAt'])
+            && d.uid == uid
+            && !exists(memberPath(partyId, uid))
+            && existsAfter(memberPath(partyId, uid))
+            && d.name == getAfter(memberPath(partyId, uid)).data.displayName;
+        }
+
+        function leaveMsg() {
+          let d = request.resource.data;
+          let uid = request.auth.uid;
+          return d.type == 'leave'
+            && d.keys().hasOnly(['type', 'uid', 'name', 'createdAt'])
+            && d.uid == uid
+            && exists(memberPath(partyId, uid))
+            && !existsAfter(memberPath(partyId, uid))
+            && d.name == get(memberPath(partyId, uid)).data.displayName;
+        }
+
+        function statusMsg() {
+          let d = request.resource.data;
+          let uid = request.auth.uid;
+          return d.type == 'status'
+            && d.keys().hasOnly(['type', 'uid', 'name', 'status', 'createdAt'])
+            && d.uid == uid
+            && uid == get(partyPath(partyId)).data.creatorId
+            && d.name == get(partyPath(partyId)).data.creatorName
+            && d.status in ['PLANNING', 'PLAYING', 'CANCELLED']
+            && get(partyPath(partyId)).data.status != d.status
+            && getAfter(partyPath(partyId)).data.status == d.status;
+        }
+
+        allow read: if signedIn();
+        allow create: if signedIn()
+          && request.resource.data.createdAt == request.time
+          && (chatMsg() || joinMsg() || leaveMsg() || statusMsg());
+        allow update, delete: if false;
       }
     }
 

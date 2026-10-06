@@ -1,7 +1,7 @@
 // Phase 3-4: parties, members and contacts on Firestore (replaces the localStorage store).
 import { useEffect, useState } from 'react'
 import {
-  collection, doc, getDoc, increment, onSnapshot, orderBy, query,
+  collection, doc, getDoc, increment, onSnapshot, limit, orderBy, query,
   serverTimestamp, Timestamp, updateDoc, where, writeBatch,
 } from 'firebase/firestore'
 import { db } from './firebase.js'
@@ -12,6 +12,10 @@ const mapParty = (s) => {
   return { ...d, id: s.id, datetime: d.datetime.toDate().toISOString() }
 }
 const partyRef = (id) => doc(db, 'parties', id)
+const msgsCol = (id) => collection(db, 'parties', id, 'messages')
+// System log line (join / leave / status). Rules only accept it together with the real change in the same batch.
+const sysMsg = (batch, id, type, uid, name, extra = {}) =>
+  batch.set(doc(msgsCol(id)), { type, uid, name, ...extra, createdAt: serverTimestamp() })
 
 // ---------- reads (live) ----------
 export function useParties() {
@@ -95,6 +99,7 @@ export async function createParty(user, base, show) {
   batch.set(doc(ref, 'members', user.userId), { displayName: base.creatorName, joinedAt: serverTimestamp() })
   batch.set(doc(ref, 'contacts', user.userId), pickShown(user, show))
   batch.update(doc(db, 'users', user.userId), { lastCreatedAt: serverTimestamp() })
+  sysMsg(batch, ref.id, 'join', user.userId, base.creatorName)
   await batch.commit()
   return ref.id
 }
@@ -104,7 +109,13 @@ export const editParty = (id, b) => updateDoc(partyRef(id), {
   description: b.description, maxPlayers: b.maxPlayers,
 })
 
-export const setPartyStatus = (id, status) => updateDoc(partyRef(id), { status })
+// party: { id, creatorId, creatorName } - the creator's status change is also logged in the chat
+export async function setPartyStatus(party, status) {
+  const batch = writeBatch(db)
+  batch.update(partyRef(party.id), { status })
+  sysMsg(batch, party.id, 'status', party.creatorId, party.creatorName, { status })
+  await batch.commit()
+}
 
 export async function joinParty(id, user, show) {
   const ref = partyRef(id)
@@ -112,14 +123,39 @@ export async function joinParty(id, user, show) {
   batch.set(doc(ref, 'members', user.userId), { displayName: user.displayName, joinedAt: serverTimestamp() })
   batch.set(doc(ref, 'contacts', user.userId), pickShown(user, show))
   batch.update(ref, { memberCount: increment(1) })
+  sysMsg(batch, id, 'join', user.userId, user.displayName)
   await batch.commit()
 }
 
-export async function leaveParty(id, uid) {
+export async function leaveParty(id, uid, name) {
   const ref = partyRef(id)
   const batch = writeBatch(db)
   batch.delete(doc(ref, 'members', uid))
   batch.delete(doc(ref, 'contacts', uid))
   batch.update(ref, { memberCount: increment(-1) })
+  sysMsg(batch, id, 'leave', uid, name)
+  await batch.commit()
+}
+
+// ---------- chat log ----------
+// Newest `n` lines, returned oldest -> newest. null = loading.
+export function useMessages(id, n) {
+  const [msgs, setMsgs] = useState(null)
+  useEffect(() => onSnapshot(
+    query(msgsCol(id), orderBy('createdAt', 'desc'), limit(n)),
+    (s) => setMsgs(s.docs.map((d) => {
+      const x = d.data({ serverTimestamps: 'estimate' })
+      return { ...x, id: d.id, at: x.createdAt.toDate() }
+    }).reverse()),
+    (e) => { console.error(e); setMsgs([]) }
+  ), [id, n])
+  return msgs
+}
+
+// Chat line + rate-limit stamp on the user doc (rules allow 1 per 5 minutes per user)
+export async function sendMessage(id, uid, name, text) {
+  const batch = writeBatch(db)
+  batch.set(doc(msgsCol(id)), { type: 'chat', uid, name, text, createdAt: serverTimestamp() })
+  batch.update(doc(db, 'users', uid), { lastMessageAt: serverTimestamp() })
   await batch.commit()
 }
